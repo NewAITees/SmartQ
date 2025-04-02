@@ -35,7 +35,7 @@ cd smartq
 2. 依存パッケージをインストール:
 
 ```bash
-pip install -r requirements.txt
+poetry install
 ```
 
 3. Ollama サービスを起動:
@@ -47,7 +47,7 @@ ollama serve
 4. アプリケーションを起動:
 
 ```bash
-python app.py
+poetry run python src/app.py
 ```
 
 5. ブラウザで以下の URL にアクセス:
@@ -86,8 +86,8 @@ http://localhost:8000
 # Ollama のエンドポイント（デフォルトは localhost:11434）
 export OLLAMA_HOST=http://localhost:11434
 
-# 使用するモデル（デフォルトは llama3）
-export OLLAMA_MODEL=llama3
+# 使用するモデル（デフォルトは gemma3）
+export OLLAMA_MODEL=gemma3:27b
 
 # アプリケーションのポート（デフォルトは 8000）
 export APP_PORT=8000

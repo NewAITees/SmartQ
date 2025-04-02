@@ -2,15 +2,19 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Optional, Dict, Any, NoReturn, Union
 
-import requests
-from requests.exceptions import RequestException
+import httpx
+from httpx import AsyncClient, HTTPError
 
 # ロガーの設定
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# ログディレクトリの作成
+os.makedirs('logs', exist_ok=True)
 
 # ファイルハンドラーの設定
 fh = logging.FileHandler(
@@ -28,7 +32,7 @@ class OllamaClient:
 
     def __init__(
         self,
-        model_name: str = "gemma3:27b",
+        model_name: str = "llama3",
         api_url: str = "http://localhost:11434/api/generate",
         temperature: float = 0.7,
     ) -> None:
@@ -95,7 +99,7 @@ class OllamaClient:
         Raises:
             Exception: 元のエラーを再送出
         """
-        if isinstance(error, RequestException):
+        if isinstance(error, HTTPError):
             logger.error("API request failed", exc_info=error)
         elif isinstance(error, json.JSONDecodeError):
             logger.error("Failed to decode API response", exc_info=error)
@@ -103,89 +107,11 @@ class OllamaClient:
             logger.error("Unexpected error occurred", exc_info=error)
         raise error
 
-    def generate_text_sync(
-        self,
-        prompt: str,
-        additional_options: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        テキストを同期的に生成する。
-
-        Args:
-            prompt (str): 入力プロンプト
-            additional_options (Optional[Dict[str, Any]]): 追加のオプション
-
-        Returns:
-            str: 生成されたテキスト。エラー時は空文字列を返す。
-        """
-        try:
-            data = self._prepare_request_data(prompt, additional_options)
-            logger.debug("Sending request to Ollama API", extra={"request_data": data})
-
-            response = requests.post(self.api_url, json=data)
-            response.raise_for_status()
-
-            result = response.json()
-            generated_text = result.get("response", "")
-
-            logger.debug(
-                "Text generation completed",
-                extra={"text_length": len(generated_text)}
-            )
-            return generated_text
-
-        except Exception as e:
-            self._handle_api_error(e)
-            return ""
-
-    def generate_json_sync(
-        self,
-        prompt: str,
-        json_schema: Optional[Dict[str, Any]] = None,
-        additional_options: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        JSON形式のデータを同期的に生成する。
-
-        Args:
-            prompt (str): 入力プロンプト
-            json_schema (Optional[Dict[str, Any]]): JSONスキーマ。Noneの場合は単純なJSON形式を指定。
-            additional_options (Optional[Dict[str, Any]]): 追加のオプション
-
-        Returns:
-            Dict[str, Any]: 生成されたJSON。エラー時は空の辞書を返す。
-
-        Note:
-            このメソッドは、投票や夜のアクションなど、構造化されたデータが必要な場合に使用します。
-            json_schemaを指定することで、特定の形式のJSONを生成できます。
-        """
-        try:
-            data = self._prepare_request_data(prompt, additional_options, json_schema)
-            logger.debug("Sending JSON request to Ollama API", extra={"request_data": data})
-
-            response = requests.post(self.api_url, json=data)
-            response.raise_for_status()
-
-            result = response.json()
-            generated_text = result.get("response", "{}")
-
-            # レスポンスがJSON文字列の場合はパースする
-            try:
-                if isinstance(generated_text, str):
-                    return json.loads(generated_text)
-                return generated_text
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse JSON response", extra={"response": generated_text})
-                return {}
-
-        except Exception as e:
-            self._handle_api_error(e)
-            return {}
-
     async def generate_text(
         self,
         prompt: str,
-        additional_options: Optional[Dict[str, Any]] = None
+        additional_options: Optional[Dict[str, Any]] = None,
+        timeout: float = 30.0
     ) -> str:
         """
         テキストを非同期で生成する。
@@ -193,6 +119,7 @@ class OllamaClient:
         Args:
             prompt (str): 入力プロンプト
             additional_options (Optional[Dict[str, Any]]): 追加のオプション
+            timeout (float): リクエストのタイムアウト秒数
 
         Returns:
             str: 生成されたテキスト。エラー時は空文字列を返す。
@@ -201,11 +128,12 @@ class OllamaClient:
             data = self._prepare_request_data(prompt, additional_options)
             logger.debug("Sending async request to Ollama API", extra={"request_data": data})
 
-            response = requests.post(self.api_url, json=data)
-            response.raise_for_status()
+            async with AsyncClient(timeout=timeout) as client:
+                response = await client.post(self.api_url, json=data)
+                response.raise_for_status()
 
-            result = response.json()
-            generated_text = result.get("response", "")
+                result = response.json()
+                generated_text = result.get("response", "")
 
             logger.debug(
                 "Async text generation completed",
@@ -221,7 +149,8 @@ class OllamaClient:
         self,
         prompt: str,
         json_schema: Optional[Dict[str, Any]] = None,
-        additional_options: Optional[Dict[str, Any]] = None
+        additional_options: Optional[Dict[str, Any]] = None,
+        timeout: float = 30.0
     ) -> Dict[str, Any]:
         """
         JSON形式のデータを非同期で生成する。
@@ -230,6 +159,7 @@ class OllamaClient:
             prompt (str): 入力プロンプト
             json_schema (Optional[Dict[str, Any]]): JSONスキーマ。Noneの場合は単純なJSON形式を指定。
             additional_options (Optional[Dict[str, Any]]): 追加のオプション
+            timeout (float): リクエストのタイムアウト秒数
 
         Returns:
             Dict[str, Any]: 生成されたJSON。エラー時は空の辞書を返す。
@@ -238,11 +168,12 @@ class OllamaClient:
             data = self._prepare_request_data(prompt, additional_options, json_schema)
             logger.debug("Sending async JSON request to Ollama API", extra={"request_data": data})
 
-            response = requests.post(self.api_url, json=data)
-            response.raise_for_status()
+            async with AsyncClient(timeout=timeout) as client:
+                response = await client.post(self.api_url, json=data)
+                response.raise_for_status()
 
-            result = response.json()
-            generated_text = result.get("response", "{}")
+                result = response.json()
+                generated_text = result.get("response", "{}")
 
             # レスポンスがJSON文字列の場合はパースする
             try:

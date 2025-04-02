@@ -32,7 +32,7 @@ const updateState = (newState) => {
 const render = () => {
     // ローディング状態の更新
     elements.generateButton.disabled = appState.isLoading;
-    elements.submitButton.disabled = appState.isLoading || !appState.currentQuestion;
+    elements.submitButton.disabled = appState.isLoading || !appState.currentQuestion || appState.selectedAnswer === null;
     
     if (appState.isLoading) {
         elements.generateButton.classList.add('loading');
@@ -69,7 +69,7 @@ const render = () => {
     // フィードバックの表示
     if (appState.feedback) {
         elements.feedbackContainer.innerHTML = `
-            <div class="feedback ${appState.feedback.isCorrect ? 'correct' : 'incorrect'}">
+            <div class="feedback ${appState.feedback.is_correct ? 'correct' : 'incorrect'}">
                 ${appState.feedback.message}
             </div>
         `;
@@ -90,7 +90,8 @@ const callApi = async (endpoint, data) => {
         });
 
         if (!response.ok) {
-            throw new Error(`API error: ${response.status}`);
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `API error: ${response.status}`);
         }
 
         return await response.json();
@@ -102,7 +103,7 @@ const callApi = async (endpoint, data) => {
 // 問題生成ハンドラ
 const handleGenerate = async () => {
     try {
-        updateState({ isLoading: true, isError: false, currentQuestion: null, feedback: null });
+        updateState({ isLoading: true, isError: false, currentQuestion: null, selectedAnswer: null, feedback: null });
 
         const data = {
             topic: elements.topicSelect.value,
@@ -141,7 +142,11 @@ const handleSubmit = async () => {
         const data = {
             question_id: appState.currentQuestion.id,
             selected_answer: appState.selectedAnswer,
-            additional_answer: elements.additionalAnswer.value
+            additional_answer: elements.additionalAnswer.value,
+            // 問題の内容と正解も送信
+            question: appState.currentQuestion.question,
+            options: appState.currentQuestion.options,
+            correct_answer: appState.currentQuestion.correct_answer
         };
 
         const result = await callApi('/api/evaluate', data);
@@ -156,15 +161,18 @@ const handleSubmit = async () => {
     }
 };
 
+// 選択肢選択ハンドラ
+const handleOptionSelect = (event) => {
+    if (event.target.type === 'radio') {
+        updateState({ selectedAnswer: parseInt(event.target.value, 10) });
+    }
+};
+
 // イベントリスナーの設定
 const setupEventListeners = () => {
     elements.generateButton.addEventListener('click', handleGenerate);
     elements.submitButton.addEventListener('click', handleSubmit);
-    elements.optionsContainer.addEventListener('change', (event) => {
-        if (event.target.type === 'radio') {
-            updateState({ selectedAnswer: parseInt(event.target.value) });
-        }
-    });
+    elements.optionsContainer.addEventListener('change', handleOptionSelect);
 };
 
 // アプリケーションの初期化
