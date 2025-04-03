@@ -150,23 +150,45 @@ button:disabled {
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.3s ease;
+    position: relative;
+    background-color: white;
 }
 
 .option-label:hover {
     background-color: #f8f9fa;
+    border-color: var(--primary-color);
+}
+
+.option-label.selected {
+    background-color: #e3f2fd;
+    border-color: var(--primary-color);
 }
 
 .option-label input[type="radio"],
 .option-label input[type="checkbox"] {
     margin-top: 0.25rem;
+    cursor: pointer;
+}
+
+.option-text {
+    flex: 1;
+    line-height: 1.4;
 }
 
 .option-label.radio {
-    background-color: #fff;
+    background-color: white;
+}
+
+.option-label.radio.selected {
+    background-color: #e3f2fd;
 }
 
 .option-label.checkbox {
-    background-color: #f8f9fa;
+    background-color: white;
+}
+
+.option-label.checkbox.selected {
+    background-color: #e3f2fd;
 }
 
 .feedback {

@@ -5,7 +5,8 @@ const appState = {
     errorMessage: '',
     currentQuestion: null,  // QuizQuestion型
     selectedOptions: [],    // 選択されたオプションのインデックス配列
-    feedback: null          // FeedbackResponse型
+    feedback: null,         // FeedbackResponse型
+    logs: []               // アプリケーションログ
 };
 
 // DOM要素の参照
@@ -29,6 +30,18 @@ const elements = {
 const updateState = (newState) => {
     Object.assign(appState, newState);
     render();
+};
+
+// ログ関数
+const log = (type, message, data = null) => {
+    const logEntry = {
+        timestamp: new Date().toISOString(),
+        type,
+        message,
+        data
+    };
+    console.log(`[${logEntry.type}] ${logEntry.message}`, data);
+    appState.logs.push(logEntry);
 };
 
 // UI更新関数
@@ -69,26 +82,47 @@ const render = () => {
 
     // 問題と選択肢の表示
     if (appState.currentQuestion) {
+        log('render', 'Rendering question and options', appState.currentQuestion);
+        
+        // 問題文の表示
         elements.questionText.textContent = appState.currentQuestion.question;
-        elements.optionsContainer.innerHTML = appState.currentQuestion.options
-            .map((option, index) => {
-                const inputType = option.type === 'checkbox' ? 'checkbox' : 'radio';
-                const name = inputType === 'checkbox' ? `answer_${index}` : 'answer';
-                
-                return `
-                    <label class="option-label ${inputType}">
-                        <input type="${inputType}" name="${name}" value="${index}" 
-                               ${appState.selectedOptions.includes(index) ? 'checked' : ''}>
-                        ${option.text}
-                    </label>
-                `;
-            }).join('');
+        
+        // 選択肢の表示
+        const optionsHtml = appState.currentQuestion.options.map((option, index) => {
+            // 選択肢の種類を決定（デフォルトはradio）
+            const inputType = option.type || 'radio';
+            const name = inputType === 'checkbox' ? `answer_${index}` : 'answer';
+            const isSelected = appState.selectedOptions.includes(index);
+            
+            // 選択肢のHTMLを生成
+            return `
+                <label class="option-label ${inputType} ${isSelected ? 'selected' : ''}"
+                       data-option-index="${index}">
+                    <input type="${inputType}" 
+                           name="${name}" 
+                           value="${index}"
+                           ${isSelected ? 'checked' : ''}>
+                    <span class="option-text">${option.text}</span>
+                </label>
+            `;
+        }).join('');
+        
+        elements.optionsContainer.innerHTML = optionsHtml;
+        
+        // 選択肢のイベントリスナーを設定
+        const optionLabels = elements.optionsContainer.querySelectorAll('.option-label');
+        optionLabels.forEach(label => {
+            const input = label.querySelector('input');
+            input.addEventListener('change', handleOptionSelect);
+        });
+        
+        log('render', 'Options rendered successfully');
     } else {
         elements.questionText.textContent = '問題を生成してください';
         elements.optionsContainer.innerHTML = '';
     }
 
-    // フィードバック表示の修正
+    // フィードバック表示の更新
     if (appState.feedback) {
         elements.feedbackContainer.innerHTML = `
             <div class="feedback ${appState.feedback.isCorrect ? 'correct' : 'incorrect'}">
@@ -124,7 +158,7 @@ const render = () => {
 // API呼び出し関数
 const callApi = async (endpoint, data) => {
     try {
-        console.log(`API Request to ${endpoint}:`, data);
+        log('api-request', `Sending request to ${endpoint}`, data);
         
         const response = await fetch(endpoint, {
             method: 'POST',
@@ -135,15 +169,20 @@ const callApi = async (endpoint, data) => {
         });
 
         const responseData = await response.json();
-        console.log(`API Response from ${endpoint}:`, responseData);
+        log('api-response', `Received response from ${endpoint}`, responseData);
 
         if (!response.ok) {
-            throw new Error(responseData.detail || `API error: ${response.status}`);
+            const error = new Error(responseData.detail || `API error: ${response.status}`);
+            error.responseData = responseData;
+            throw error;
         }
 
         return responseData;
     } catch (error) {
-        console.error(`API Error (${endpoint}):`, error);
+        log('api-error', `Error in API call to ${endpoint}`, {
+            error: error.message,
+            responseData: error.responseData
+        });
         throw new Error(`Network error: ${error.message}`);
     }
 };
@@ -151,6 +190,7 @@ const callApi = async (endpoint, data) => {
 // 問題生成ハンドラ
 const handleGenerate = async () => {
     try {
+        log('user-action', 'Generating new question');
         updateState({ 
             isLoading: true, 
             isError: false, 
@@ -166,11 +206,13 @@ const handleGenerate = async () => {
         };
 
         const result = await callApi('/api/generate', data);
+        log('question-generated', 'New question generated successfully', result);
         updateState({ 
             currentQuestion: result,
             selectedOptions: []
         });
     } catch (error) {
+        log('error', 'Failed to generate question', error);
         updateState({ 
             isError: true, 
             errorMessage: `問題の生成中にエラーが発生しました: ${error.message}`
@@ -182,12 +224,14 @@ const handleGenerate = async () => {
 
 // 選択肢の処理ハンドラ
 const handleOptionSelect = (event) => {
+    const value = parseInt(event.target.value, 10);
+    log('user-action', 'Option selected', { value, type: event.target.type });
+
     if (event.target.type === 'radio') {
         // ラジオボタンの場合は単一選択
-        updateState({ selectedOptions: [parseInt(event.target.value, 10)] });
+        updateState({ selectedOptions: [value] });
     } else if (event.target.type === 'checkbox') {
         // チェックボックスの場合は複数選択可能
-        const value = parseInt(event.target.value, 10);
         let selectedOptions = [...appState.selectedOptions];
         
         if (event.target.checked) {
@@ -202,11 +246,14 @@ const handleOptionSelect = (event) => {
         
         updateState({ selectedOptions });
     }
+    
+    log('state-update', 'Selected options updated', appState.selectedOptions);
 };
 
 // 回答送信ハンドラ
 const handleSubmit = async () => {
     if (!appState.currentQuestion || appState.selectedOptions.length === 0) {
+        log('validation-error', 'No answer selected');
         updateState({
             isError: true,
             errorMessage: '回答を選択してください'
@@ -215,6 +262,11 @@ const handleSubmit = async () => {
     }
 
     try {
+        log('user-action', 'Submitting answer', {
+            selectedOptions: appState.selectedOptions,
+            additionalAnswer: elements.additionalAnswer.value
+        });
+        
         updateState({ isLoading: true, isError: false });
 
         const data = {
@@ -229,8 +281,10 @@ const handleSubmit = async () => {
         };
 
         const result = await callApi('/api/evaluate', data);
+        log('answer-evaluated', 'Answer evaluation received', result);
         updateState({ feedback: result });
     } catch (error) {
+        log('error', 'Failed to evaluate answer', error);
         updateState({
             isError: true,
             errorMessage: `回答の評価中にエラーが発生しました: ${error.message}`
