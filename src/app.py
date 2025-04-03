@@ -38,7 +38,7 @@ app = FastAPI(
 )
 
 # 静的ファイルとテンプレートの設定
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # 共通の制約条件付き型を定義
