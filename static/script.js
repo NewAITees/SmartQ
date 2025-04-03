@@ -3,9 +3,9 @@ const appState = {
     isLoading: false,
     isError: false,
     errorMessage: '',
-    currentQuestion: null,
-    selectedAnswer: null,
-    feedback: null
+    currentQuestion: null,  // QuizQuestion型
+    selectedOptions: [],    // 選択されたオプションのインデックス配列
+    feedback: null          // FeedbackResponse型
 };
 
 // DOM要素の参照
@@ -13,13 +13,16 @@ const elements = {
     topicSelect: document.getElementById('topicSelect'),
     generateButton: document.getElementById('generateButton'),
     submitButton: document.getElementById('submitButton'),
+    nextButton: document.getElementById('nextButton'),
     questionText: document.getElementById('questionText'),
     optionsContainer: document.getElementById('optionsContainer'),
     additionalAnswer: document.getElementById('additionalAnswer'),
     feedbackContainer: document.getElementById('feedbackContainer'),
     errorMessage: document.getElementById('errorMessage'),
     systemPrompt: document.getElementById('systemPrompt'),
-    knowledgeInput: document.getElementById('knowledgeInput')
+    knowledgeInput: document.getElementById('knowledgeInput'),
+    loadingSpinner: document.getElementById('loadingSpinner'),
+    initialMessage: document.getElementById('initialMessage')
 };
 
 // 状態更新関数
@@ -32,12 +35,16 @@ const updateState = (newState) => {
 const render = () => {
     // ローディング状態の更新
     elements.generateButton.disabled = appState.isLoading;
-    elements.submitButton.disabled = appState.isLoading || !appState.currentQuestion || appState.selectedAnswer === null;
+    elements.submitButton.disabled = appState.isLoading || 
+                                    !appState.currentQuestion || 
+                                    appState.selectedOptions.length === 0;
     
     if (appState.isLoading) {
+        elements.loadingSpinner.classList.add('visible');
         elements.generateButton.classList.add('loading');
         elements.submitButton.classList.add('loading');
     } else {
+        elements.loadingSpinner.classList.remove('visible');
         elements.generateButton.classList.remove('loading');
         elements.submitButton.classList.remove('loading');
     }
@@ -50,37 +57,75 @@ const render = () => {
         elements.errorMessage.classList.remove('visible');
     }
 
+    // 次の問題ボタンの状態
+    if (elements.nextButton) {
+        elements.nextButton.style.display = appState.feedback ? 'block' : 'none';
+    }
+
+    // 初期メッセージの表示/非表示
+    if (elements.initialMessage) {
+        elements.initialMessage.style.display = appState.currentQuestion ? 'none' : 'block';
+    }
+
     // 問題と選択肢の表示
     if (appState.currentQuestion) {
         elements.questionText.textContent = appState.currentQuestion.question;
         elements.optionsContainer.innerHTML = appState.currentQuestion.options
-            .map((option, index) => `
-                <label class="radio-option">
-                    <input type="radio" name="answer" value="${index}" 
-                           ${appState.selectedAnswer === index ? 'checked' : ''}>
-                    ${option}
-                </label>
-            `).join('');
+            .map((option, index) => {
+                const inputType = option.type === 'checkbox' ? 'checkbox' : 'radio';
+                const name = inputType === 'checkbox' ? `answer_${index}` : 'answer';
+                
+                return `
+                    <label class="option-label ${inputType}">
+                        <input type="${inputType}" name="${name}" value="${index}" 
+                               ${appState.selectedOptions.includes(index) ? 'checked' : ''}>
+                        ${option.text}
+                    </label>
+                `;
+            }).join('');
     } else {
         elements.questionText.textContent = '問題を生成してください';
         elements.optionsContainer.innerHTML = '';
     }
 
-    // フィードバックの表示
+    // フィードバック表示の修正
     if (appState.feedback) {
         elements.feedbackContainer.innerHTML = `
-            <div class="feedback ${appState.feedback.is_correct ? 'correct' : 'incorrect'}">
-                ${appState.feedback.message}
+            <div class="feedback ${appState.feedback.isCorrect ? 'correct' : 'incorrect'}">
+                <h3>${appState.feedback.isCorrect ? '正解です！' : '不正解です。'}</h3>
+                <p>${appState.feedback.feedback}</p>
+                <div class="detailed-explanation">
+                    <h4>詳細解説:</h4>
+                    <p>${appState.feedback.detailedExplanation}</p>
+                </div>
+                ${appState.feedback.additionalResources ? `
+                    <div class="additional-resources">
+                        <h4>追加リソース:</h4>
+                        <ul>
+                            ${appState.feedback.additionalResources.map(resource => `
+                                <li><strong>${resource.title}</strong>: ${resource.description}</li>
+                            `).join('')}
+                        </ul>
+                    </div>
+                ` : ''}
+                <div class="explanation">
+                    <h4>問題解説:</h4>
+                    <p>${appState.currentQuestion.explanation}</p>
+                </div>
             </div>
         `;
+        elements.feedbackContainer.classList.add('visible');
     } else {
         elements.feedbackContainer.innerHTML = '';
+        elements.feedbackContainer.classList.remove('visible');
     }
 };
 
 // API呼び出し関数
 const callApi = async (endpoint, data) => {
     try {
+        console.log(`API Request to ${endpoint}:`, data);
+        
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: {
@@ -89,13 +134,16 @@ const callApi = async (endpoint, data) => {
             body: JSON.stringify(data)
         });
 
+        const responseData = await response.json();
+        console.log(`API Response from ${endpoint}:`, responseData);
+
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.detail || `API error: ${response.status}`);
+            throw new Error(responseData.detail || `API error: ${response.status}`);
         }
 
-        return await response.json();
+        return responseData;
     } catch (error) {
+        console.error(`API Error (${endpoint}):`, error);
         throw new Error(`Network error: ${error.message}`);
     }
 };
@@ -103,7 +151,13 @@ const callApi = async (endpoint, data) => {
 // 問題生成ハンドラ
 const handleGenerate = async () => {
     try {
-        updateState({ isLoading: true, isError: false, currentQuestion: null, selectedAnswer: null, feedback: null });
+        updateState({ 
+            isLoading: true, 
+            isError: false, 
+            currentQuestion: null, 
+            selectedOptions: [], 
+            feedback: null 
+        });
 
         const data = {
             topic: elements.topicSelect.value,
@@ -114,7 +168,7 @@ const handleGenerate = async () => {
         const result = await callApi('/api/generate', data);
         updateState({ 
             currentQuestion: result,
-            selectedAnswer: null
+            selectedOptions: []
         });
     } catch (error) {
         updateState({ 
@@ -126,9 +180,33 @@ const handleGenerate = async () => {
     }
 };
 
+// 選択肢の処理ハンドラ
+const handleOptionSelect = (event) => {
+    if (event.target.type === 'radio') {
+        // ラジオボタンの場合は単一選択
+        updateState({ selectedOptions: [parseInt(event.target.value, 10)] });
+    } else if (event.target.type === 'checkbox') {
+        // チェックボックスの場合は複数選択可能
+        const value = parseInt(event.target.value, 10);
+        let selectedOptions = [...appState.selectedOptions];
+        
+        if (event.target.checked) {
+            // 選択追加
+            if (!selectedOptions.includes(value)) {
+                selectedOptions.push(value);
+            }
+        } else {
+            // 選択解除
+            selectedOptions = selectedOptions.filter(item => item !== value);
+        }
+        
+        updateState({ selectedOptions });
+    }
+};
+
 // 回答送信ハンドラ
 const handleSubmit = async () => {
-    if (!appState.currentQuestion || appState.selectedAnswer === null) {
+    if (!appState.currentQuestion || appState.selectedOptions.length === 0) {
         updateState({
             isError: true,
             errorMessage: '回答を選択してください'
@@ -141,12 +219,13 @@ const handleSubmit = async () => {
 
         const data = {
             question_id: appState.currentQuestion.id,
-            selected_answer: appState.selectedAnswer,
+            selected_options: appState.selectedOptions.map(index => ({
+                index,
+                text: appState.currentQuestion.options[index].text
+            })),
             additional_answer: elements.additionalAnswer.value,
-            // 問題の内容と正解も送信
             question: appState.currentQuestion.question,
-            options: appState.currentQuestion.options,
-            correct_answer: appState.currentQuestion.correct_answer
+            options: appState.currentQuestion.options
         };
 
         const result = await callApi('/api/evaluate', data);
@@ -161,11 +240,17 @@ const handleSubmit = async () => {
     }
 };
 
-// 選択肢選択ハンドラ
-const handleOptionSelect = (event) => {
-    if (event.target.type === 'radio') {
-        updateState({ selectedAnswer: parseInt(event.target.value, 10) });
-    }
+// 次の問題ハンドラ
+const handleNext = () => {
+    updateState({
+        currentQuestion: null,
+        selectedOptions: [],
+        feedback: null,
+        isError: false
+    });
+    
+    // フォーカスを問題生成ボタンに移動
+    elements.generateButton.focus();
 };
 
 // イベントリスナーの設定
@@ -173,6 +258,9 @@ const setupEventListeners = () => {
     elements.generateButton.addEventListener('click', handleGenerate);
     elements.submitButton.addEventListener('click', handleSubmit);
     elements.optionsContainer.addEventListener('change', handleOptionSelect);
+    if (elements.nextButton) {
+        elements.nextButton.addEventListener('click', handleNext);
+    }
 };
 
 // アプリケーションの初期化

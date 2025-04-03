@@ -32,8 +32,8 @@ class OllamaClient:
 
     def __init__(
         self,
-        model_name: str = "llama3",
-        api_url: str = "http://localhost:11434/api/generate",
+        model_name: str = "gemma3:27b",
+        api_url: str = "http://localhost:11434",
         temperature: float = 0.7,
     ) -> None:
         """
@@ -41,18 +41,18 @@ class OllamaClient:
 
         Args:
             model_name (str): 使用するモデル名
-            api_url (str): Ollama APIのURL
+            api_url (str): Ollama APIのベースURL
             temperature (float): 生成時の温度パラメータ
         """
         self.model_name = model_name
-        self.api_url = api_url
+        self.base_url = api_url.rstrip('/')  # 末尾のスラッシュを削除
         self.temperature = temperature
         logger.info(
             "OllamaClient initialized",
             extra={
                 "model": model_name,
                 "temperature": temperature,
-                "api_url": api_url
+                "base_url": self.base_url
             }
         )
 
@@ -83,6 +83,9 @@ class OllamaClient:
         # JSON形式の出力を要求する場合
         if json_schema:
             data["format"] = json_schema if isinstance(json_schema, dict) else "json"
+        else:
+            # デフォルトでJSONを要求
+            data["format"] = "json"
 
         if additional_options:
             data.update(additional_options)
@@ -129,7 +132,8 @@ class OllamaClient:
             logger.debug("Sending async request to Ollama API", extra={"request_data": data})
 
             async with AsyncClient(timeout=timeout) as client:
-                response = await client.post(self.api_url, json=data)
+                api_url = f"{self.base_url}/api/generate"
+                response = await client.post(api_url, json=data)
                 response.raise_for_status()
 
                 result = response.json()
@@ -169,7 +173,8 @@ class OllamaClient:
             logger.debug("Sending async JSON request to Ollama API", extra={"request_data": data})
 
             async with AsyncClient(timeout=timeout) as client:
-                response = await client.post(self.api_url, json=data)
+                api_url = f"{self.base_url}/api/generate"
+                response = await client.post(api_url, json=data)
                 response.raise_for_status()
 
                 result = response.json()

@@ -1,68 +1,207 @@
+"""SmartQ FastAPIアプリケーション"""
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from fastapi.requests import Request
-from pydantic import BaseModel, Field
+from typing import List, Optional, Union, Annotated
+from pydantic import BaseModel, Field, field_validator, model_validator
+from enum import Enum
 import json
 import os
-from typing import List, Optional, Dict, Any
+import uuid
 import asyncio
 
-# OllamaClientをインポート
+# OllamaClientとJSONスキーマをインポート
 from ollama.ollama_client import OllamaClient
+from ollama.json_schemas import QUIZ_SCHEMA, EVALUATION_SCHEMA
 
 # 環境変数から設定を読み込み
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-API_TIMEOUT = float(os.getenv("API_TIMEOUT", "30"))
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:27b")
+API_TIMEOUT = float(os.getenv("API_TIMEOUT", "60"))
 
+# FastAPIアプリケーションの初期化
 app = FastAPI(
-    title="SmartQ",
-    description="Ollama AIを活用したクイズアプリケーション",
-    version="0.1.0",
+    title="SmartQ API",
+    description="Ollama AIを活用したインテリジェントなクイズアプリケーションのAPI",
+    version="0.2.0",
     docs_url="/api/docs",  # Swagger UIのURL
     redoc_url="/api/redoc",  # ReDocのURL
+    openapi_tags=[
+        {
+            "name": "クイズ",
+            "description": "クイズの生成と回答評価に関連するエンドポイント"
+        }
+    ]
 )
 
 # 静的ファイルとテンプレートの設定
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# リクエスト/レスポンスモデル
-class GenerateRequest(BaseModel):
+# 共通の制約条件付き型を定義
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+# データモデルの定義
+class OptionType(str, Enum):
+    """選択肢のタイプを表す列挙型"""
+    RADIO = "radio"
+    CHECKBOX = "checkbox"
+
+class Option(BaseModel):
+    """選択肢のモデル"""
+    text: NonEmptyStr = Field(..., description="選択肢のテキスト")
+    isCorrect: bool = Field(..., description="この選択肢が正解かどうか")
+    type: OptionType = Field(default=OptionType.RADIO, description="選択肢のタイプ（radio/checkbox）")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": "Pythonは動的型付け言語である",
+                "isCorrect": True,
+                "type": "radio"
+            }
+        }
+    }
+
+class QuizQuestion(BaseModel):
+    """問題のモデル"""
+    id: str = Field(..., description="問題の一意の識別子")
+    question: NonEmptyStr = Field(..., description="問題文")
+    options: List[Option] = Field(..., description="選択肢のリスト", min_length=2)
+    explanation: str = Field(..., description="問題の解説文（回答後に表示）")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "id": "q123e4567-e89b-12d3-a456-426614174000",
+                "question": "Pythonの特徴として正しいものはどれですか？",
+                "options": [
+                    {"text": "コンパイル言語である", "isCorrect": False, "type": "radio"},
+                    {"text": "動的型付け言語である", "isCorrect": True, "type": "radio"},
+                    {"text": "メモリ管理を手動で行う必要がある", "isCorrect": False, "type": "radio"},
+                    {"text": "C言語の派生言語である", "isCorrect": False, "type": "radio"}
+                ],
+                "explanation": "Pythonは動的型付け言語で、実行時に型チェックが行われます。また、ガベージコレクションによって自動的にメモリ管理が行われます。"
+            }
+        }
+    }
+    
+    @model_validator(mode='after')
+    def validate_options(self):
+        """少なくとも1つの正解選択肢があることを確認"""
+        if not any(opt.isCorrect for opt in self.options):
+            raise ValueError("少なくとも1つの選択肢は正解としてマークされている必要があります")
+        
+        # ラジオボタンの場合は正解が1つだけであることを確認
+        if all(opt.type == OptionType.RADIO for opt in self.options):
+            correct_count = sum(1 for opt in self.options if opt.isCorrect)
+            if correct_count != 1:
+                raise ValueError("ラジオボタン選択式の場合、正解は1つだけである必要があります")
+        
+        return self
+
+class GenerateQuizRequest(BaseModel):
     """問題生成リクエストのモデル"""
-    topic: str = Field(..., description="問題のトピック（例: 'programming', 'science'）")
+    topic: NonEmptyStr = Field(..., description="問題のトピック（例: 'programming', 'science'）")
     system_prompt: str = Field(..., description="問題生成のためのシステムプロンプト")
     knowledge_base: Optional[str] = Field(None, description="追加の知識ベース情報（オプション）")
 
-class Question(BaseModel):
-    """問題のモデル"""
-    id: str = Field(..., description="問題の識別子")
-    question: str = Field(..., description="問題文")
-    options: List[str] = Field(..., description="選択肢のリスト")
-    correct_answer: int = Field(..., description="正解の選択肢のインデックス（0-3）")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "topic": "programming",
+                "system_prompt": "初心者向けのPythonプログラミングに関する問題を作成してください。",
+                "knowledge_base": "Pythonはインタープリタ型の高水準プログラミング言語です。"
+            }
+        }
+    }
 
-class EvaluateRequest(BaseModel):
+class SelectedOption(BaseModel):
+    """選択された選択肢のモデル"""
+    index: int = Field(..., description="選択肢のインデックス", ge=0)
+    text: NonEmptyStr = Field(..., description="選択肢のテキスト")
+
+class EvaluateAnswerRequest(BaseModel):
     """回答評価リクエストのモデル"""
     question_id: str = Field(..., description="問題の識別子")
-    selected_answer: int = Field(..., description="選択された回答のインデックス（0-3）")
+    selected_options: List[SelectedOption] = Field(..., description="選択された選択肢のリスト")
     additional_answer: Optional[str] = Field(None, description="追加の回答や説明（オプション）")
-    question: str = Field(..., description="問題文")
-    options: List[str] = Field(..., description="選択肢のリスト")
-    correct_answer: int = Field(..., description="正解のインデックス")
+    question: NonEmptyStr = Field(..., description="問題文")
+    options: List[Option] = Field(..., description="問題の全選択肢")
 
-class Feedback(BaseModel):
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "question_id": "q123e4567-e89b-12d3-a456-426614174000",
+                "selected_options": [
+                    {"index": 1, "text": "動的型付け言語である"}
+                ],
+                "additional_answer": "動的型付けとは、変数の型が実行時に決定されることです。",
+                "question": "Pythonの特徴として正しいものはどれですか？",
+                "options": [
+                    {"text": "コンパイル言語である", "isCorrect": False, "type": "radio"},
+                    {"text": "動的型付け言語である", "isCorrect": True, "type": "radio"},
+                    {"text": "メモリ管理を手動で行う必要がある", "isCorrect": False, "type": "radio"},
+                    {"text": "C言語の派生言語である", "isCorrect": False, "type": "radio"}
+                ]
+            }
+        }
+    }
+    
+    @field_validator('selected_options')
+    @classmethod
+    def validate_selected_options(cls, v):
+        """少なくとも1つの選択肢が選択されていることを確認"""
+        if not v:
+            raise ValueError("少なくとも1つの選択肢を選択してください")
+        return v
+
+class AdditionalResource(BaseModel):
+    """追加リソースのモデル"""
+    title: NonEmptyStr = Field(..., description="リソースのタイトル")
+    description: str = Field(..., description="リソースの説明")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "title": "Python公式ドキュメント",
+                "description": "Pythonの詳細な仕様や使い方を学ぶことができます。"
+            }
+        }
+    }
+
+class FeedbackResponse(BaseModel):
     """フィードバックのモデル"""
-    is_correct: bool = Field(..., description="回答が正解かどうか")
-    message: str = Field(..., description="フィードバックメッセージ")
+    isCorrect: bool = Field(..., description="回答が正解かどうか")
+    feedback: str = Field(..., description="フィードバックメッセージ")
+    detailedExplanation: str = Field(..., description="詳細な解説")
+    additionalResources: Optional[List[AdditionalResource]] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "isCorrect": True,
+                "feedback": "正解です！Pythonは動的型付け言語です。",
+                "detailedExplanation": "Pythonでは変数の型が実行時に決定され、同じ変数に異なる型の値を代入することができます。これにより柔軟なコーディングが可能になりますが、型関連のエラーが実行時まで検出されない場合もあります。",
+                "additionalResources": [
+                    {
+                        "title": "Python公式ドキュメント",
+                        "description": "Pythonの詳細な仕様や使い方を学ぶことができます。"
+                    }
+                ]
+            }
+        }
+    }
 
 # OllamaClientのインスタンスを取得する依存関係
 def get_ollama_client():
     """OllamaClientのインスタンスを取得する"""
     return OllamaClient(
         model_name=OLLAMA_MODEL,
-        api_url=f"{OLLAMA_HOST}/api/generate",
+        api_url=OLLAMA_HOST,
         temperature=0.7
     )
 
@@ -72,9 +211,9 @@ async def root(request: Request):
     """メインページを表示"""
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.post("/api/generate", response_model=Question)
-async def generate_question(
-    request: GenerateRequest,
+@app.post("/api/generate", response_model=QuizQuestion, tags=["クイズ"])
+async def generate_quiz(
+    request: GenerateQuizRequest,
     ollama_client: OllamaClient = Depends(get_ollama_client)
 ):
     """
@@ -91,24 +230,21 @@ async def generate_question(
 知識ベース:
 {request.knowledge_base or '特になし'}
 
-出力は以下のJSON形式で行ってください:
-{{
-    "question": "問題文をここに記述",
-    "options": ["選択肢1", "選択肢2", "選択肢3", "選択肢4"],
-    "correct_answer": 0  // 0-3の整数で、正解の選択肢のインデックスを指定
-}}
+問題はシングルチョイス（ラジオボタン選択式）で作成してください。
+選択肢の1つだけを正解としてマークしてください。
+すべての選択肢のタイプは "radio" としてください。
 
-注意:
-- 問題文は明確で理解しやすいものにしてください
-- 選択肢は4つ必要です
-- correct_answerは0から3の整数である必要があります
-- 純粋なJSONのみを出力してください
+出力は以下の形式に厳密に従ってください:
+- question: 問題文
+- options: 選択肢のリスト（各選択肢はtextとisCorrectとtypeを持つ）
+- explanation: 問題の詳細な解説
 """
 
     try:
         # Ollamaから応答を取得
         response_json = await ollama_client.generate_json(
             prompt=prompt,
+            json_schema=QUIZ_SCHEMA,  # スキーマを明示的に指定
             timeout=API_TIMEOUT
         )
 
@@ -117,20 +253,29 @@ async def generate_question(
             raise ValueError("Empty response from AI")
 
         # 必要なフィールドの存在チェック
-        if not all(key in response_json for key in ["question", "options", "correct_answer"]):
+        if not all(key in response_json for key in ["question", "options", "explanation"]):
             raise ValueError("Required fields missing in response")
-        if len(response_json["options"]) != 4:
-            raise ValueError("Exactly 4 options required")
-        if not isinstance(response_json["correct_answer"], int) or not 0 <= response_json["correct_answer"] <= 3:
-            raise ValueError("correct_answer must be an integer between 0 and 3")
+            
+        # 選択肢のチェック
+        if len(response_json["options"]) < 2:
+            raise ValueError("At least 2 options are required")
+            
+        # 少なくとも1つの正解が必要
+        correct_options = [opt for opt in response_json["options"] if opt.get("isCorrect", False)]
+        if not correct_options:
+            raise ValueError("At least one option must be marked as correct")
 
-        # QuestionモデルにIDを追加して返す
-        return Question(
-            id=str(hash(response_json["question"])),  # 簡易的なID生成
+        # uniqueなID生成
+        question_id = str(uuid.uuid4())
+        
+        # QuizQuestionモデルに変換して返す
+        return QuizQuestion(
+            id=question_id,
             question=response_json["question"],
             options=response_json["options"],
-            correct_answer=response_json["correct_answer"]
+            explanation=response_json["explanation"]
         )
+        
     except ValueError as e:
         raise HTTPException(
             status_code=502,
@@ -139,9 +284,9 @@ async def generate_question(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.post("/api/evaluate", response_model=Feedback)
+@app.post("/api/evaluate", response_model=FeedbackResponse, tags=["クイズ"])
 async def evaluate_answer(
-    request: EvaluateRequest,
+    request: EvaluateAnswerRequest,
     ollama_client: OllamaClient = Depends(get_ollama_client)
 ):
     """
@@ -149,47 +294,49 @@ async def evaluate_answer(
 
     ユーザーの回答を受け取り、Ollama AIを使用して評価と解説を生成します。
     """
-    # 正解かどうかを判定
-    is_correct = request.selected_answer == request.correct_answer
+    try:
+        # 正解の選択肢と選択された選択肢を抽出
+        correct_options = [i for i, opt in enumerate(request.options) if opt.isCorrect]
+        selected_indices = [opt.index for opt in request.selected_options]
+        
+        # 単一選択問題の場合の簡易判定
+        single_choice = all(opt.type == "radio" for opt in request.options)
+        if single_choice:
+            is_correct = len(selected_indices) == 1 and selected_indices[0] in correct_options
+        else:
+            # 複数選択問題の場合
+            is_correct = set(selected_indices) == set(correct_options)
 
-    # 評価用プロンプトの構築
-    prompt = f"""あなたは教育目的のクイズ評価AIです。
-ユーザーの回答を評価し、フィードバックを提供してください。
+        # 評価用プロンプトの構築
+        prompt = f"""あなたは教育目的のクイズ評価AIです。
+ユーザーの回答を評価し、詳細なフィードバックを提供してください。
 
 問題:
 {request.question}
 
 選択肢:
-{', '.join([f"{i+1}. {opt}" for i, opt in enumerate(request.options)])}
-
-正解:
-{request.correct_answer + 1}. {request.options[request.correct_answer]}
+{json.dumps([opt.model_dump() for opt in request.options], ensure_ascii=False)}
 
 ユーザーの選択:
-{request.selected_answer + 1}. {request.options[request.selected_answer]}
-
-ユーザーの回答は{'正解' if is_correct else '不正解'}です。
+{json.dumps([opt.model_dump() for opt in request.selected_options], ensure_ascii=False)}
 
 ユーザーの追加回答/質問:
 {request.additional_answer or "なし"}
 
-出力は以下のJSON形式で行ってください:
-{{
-    "is_correct": {str(is_correct).lower()},
-    "message": "フィードバックメッセージ"  // 評価コメント、解説、アドバイスなど
-}}
+正解かどうか:
+{is_correct}
 
-注意:
-- フィードバックは建設的で学習意欲を高めるものにしてください
-- 誤りがあった場合は、正しい理解に導くような説明を含めてください
-- 追加の回答/質問があれば、それに対する応答も含めてください
-- 純粋なJSONのみを出力してください
+以下の形式で回答を評価してください:
+- isCorrect: ユーザーの回答が正解かどうか（boolean）
+- feedback: 簡潔なフィードバックメッセージ
+- detailedExplanation: 詳細な解説（概念の説明、関連する知識など）
+- additionalResources: 追加リソース（オプション）
 """
 
-    try:
         # Ollamaから応答を取得
         response_json = await ollama_client.generate_json(
             prompt=prompt,
+            json_schema=EVALUATION_SCHEMA,
             timeout=API_TIMEOUT
         )
 
@@ -198,10 +345,18 @@ async def evaluate_answer(
             raise ValueError("Empty response from AI")
 
         # 必要なフィールドの存在チェック
-        if not all(key in response_json for key in ["is_correct", "message"]):
-            raise ValueError("Required fields missing in response")
+        required_fields = ["isCorrect", "feedback", "detailedExplanation"]
+        if not all(key in response_json for key in required_fields):
+            raise ValueError(f"Required fields missing in response. Expected: {required_fields}, got: {list(response_json.keys())}")
 
-        return Feedback(**response_json)
+        # FeedbackResponseモデルに変換して返す
+        return FeedbackResponse(
+            isCorrect=response_json["isCorrect"],
+            feedback=response_json["feedback"],
+            detailedExplanation=response_json["detailedExplanation"],
+            additionalResources=response_json.get("additionalResources")
+        )
+        
     except ValueError as e:
         raise HTTPException(
             status_code=502,
