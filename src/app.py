@@ -202,7 +202,7 @@ def get_ollama_client():
     return OllamaClient(
         model_name=OLLAMA_MODEL,
         api_url=OLLAMA_HOST,
-        temperature=0.7
+        temperature=1.0
     )
 
 # ルート
